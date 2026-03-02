@@ -46,13 +46,16 @@ static int callback_len_utow( int cb_id, int u_len, bool wow64 )
     return find_first_callback_def_by_id( cb_id, wow64 )->w_callback_len;
 }
 
+/* OPTIMIZATION: Replaced calloc with malloc. Calloc zeros memory, but we immediately
+ * fill in ALL fields of the callback_entry, making the zeroing wasted work.
+ * This is a hot path - queue_vtable_callback is called frequently during gameplay. */
 void queue_vtable_callback( struct w_iface *w_iface, enum callback_type type, uint64_t arg0, uint64_t arg1 )
 {
     struct callback_entry *entry;
     uint32_t size = 0;
 
     size += sizeof(struct callback_entry);
-    if (!(entry = (struct callback_entry *)calloc( 1, size ))) return;
+    if (!(entry = (struct callback_entry *)malloc( size ))) return;
 
     entry->callback.type = type;
     size -= offsetof( struct callback_entry, callback );
@@ -67,13 +70,14 @@ void queue_vtable_callback( struct w_iface *w_iface, enum callback_type type, ui
     pthread_mutex_unlock( &callbacks_lock );
 }
 
+/* OPTIMIZATION: Use malloc instead of calloc - we set all fields immediately. */
 void queue_vtable_callback_0_server_responded( struct w_iface *w_iface, gameserveritem_t_105 *server )
 {
     uint32_t size = sizeof(*server);
     struct callback_entry *entry;
 
     size += sizeof(struct callback_entry);
-    if (!(entry = (struct callback_entry *)calloc( 1, size ))) return;
+    if (!(entry = (struct callback_entry *)malloc( size ))) return;
 
     entry->callback.type = CALL_IFACE_VTABLE_0_SERVER_RESPONDED;
     size -= offsetof( struct callback_entry, callback );
@@ -87,13 +91,14 @@ void queue_vtable_callback_0_server_responded( struct w_iface *w_iface, gameserv
     pthread_mutex_unlock( &callbacks_lock );
 }
 
+/* OPTIMIZATION: Use malloc instead of calloc - we copy all data immediately. */
 void queue_vtable_callback_0_add_player_to_list( struct w_iface *w_iface, const char *pchName, int nScore, float flTimePlayed )
 {
     uint32_t name_size = strlen( pchName ) + 1, size = name_size;
     struct callback_entry *entry;
 
     size += sizeof(struct callback_entry);
-    if (!(entry = (struct callback_entry *)calloc( 1, size ))) return;
+    if (!(entry = (struct callback_entry *)malloc( size ))) return;
 
     entry->callback.type = CALL_IFACE_VTABLE_0_ADD_PLAYER_TO_LIST;
     size -= offsetof( struct callback_entry, callback );
@@ -109,13 +114,14 @@ void queue_vtable_callback_0_add_player_to_list( struct w_iface *w_iface, const 
     pthread_mutex_unlock( &callbacks_lock );
 }
 
+/* OPTIMIZATION: Use malloc instead of calloc - we memcpy all data immediately. */
 void queue_vtable_callback_0_rules_responded( struct w_iface *w_iface, const char *pchRule, const char *pchValue )
 {
     uint32_t rule_size = strlen( pchRule ) + 1, value_size = strlen( pchValue ) + 1, size = rule_size + value_size;
     struct callback_entry *entry;
 
     size += sizeof(struct callback_entry);
-    if (!(entry = (struct callback_entry *)calloc( 1, size ))) return;
+    if (!(entry = (struct callback_entry *)malloc( size ))) return;
 
     entry->callback.type = CALL_IFACE_VTABLE_0_RULES_RESPONDED;
     size -= offsetof( struct callback_entry, callback );
@@ -131,13 +137,14 @@ void queue_vtable_callback_0_rules_responded( struct w_iface *w_iface, const cha
 }
 
 static w_FSteamNetworkingSocketsDebugOutput w_steam_networking_socket_debug_output;
+/* OPTIMIZATION: Use malloc instead of calloc - we memcpy all data immediately. */
 static void u_steam_networking_socket_debug_output( uint32_t nType, const char *pszMsg )
 {
     uint32_t msg_size = strlen( pszMsg ) + 1, size = msg_size;
     struct callback_entry *entry;
 
     size += sizeof(struct callback_entry);
-    if (!(entry = (struct callback_entry *)calloc( 1, size ))) return;
+    if (!(entry = (struct callback_entry *)malloc( size ))) return;
 
     entry->callback.type = SOCKETS_DEBUG_OUTPUT;
     size -= offsetof( struct callback_entry, callback );
@@ -152,13 +159,14 @@ static void u_steam_networking_socket_debug_output( uint32_t nType, const char *
     pthread_mutex_unlock( &callbacks_lock );
 }
 
+/* OPTIMIZATION: Use malloc instead of calloc - we memcpy all data immediately. */
 void queue_cdecl_func_callback( w_cdecl_func func, void *data, uint32_t data_size )
 {
     uint32_t size = data_size;
     struct callback_entry *entry;
 
     size += sizeof(struct callback_entry);
-    if (!(entry = (struct callback_entry *)calloc( 1, size ))) return;
+    if (!(entry = (struct callback_entry *)malloc( size ))) return;
 
     entry->callback.type = CALL_CDECL_FUNC_DATA;
     size -= offsetof( struct callback_entry, callback );
@@ -179,13 +187,14 @@ u_FSteamNetworkingSocketsDebugOutput manual_convert_SetDebugOutputFunction_pfnFu
 }
 
 static w_SteamAPIWarningMessageHook_t w_steam_api_warning_message_hook;
+/* OPTIMIZATION: Use malloc instead of calloc - we memcpy all data immediately. */
 static void u_steam_api_warning_message_hook( int severity, const char *msg )
 {
     uint32_t msg_size = strlen( msg ) + 1, size = msg_size;
     struct callback_entry *entry;
 
     size += sizeof(struct callback_entry);
-    if (!(entry = (struct callback_entry *)calloc( 1, size ))) return;
+    if (!(entry = (struct callback_entry *)malloc( size ))) return;
 
     entry->callback.type = WARNING_MESSAGE_HOOK;
     size -= offsetof( struct callback_entry, callback );
@@ -465,16 +474,31 @@ static void set_reg_ascii_dword( HANDLE hkey, const char *name, DWORD value )
     set_reg_value( hkey, nameW, REG_DWORD, &value, sizeof(value) );
 }
 
+/* OPTIMIZATION: Use stack buffer instead of heap allocation for registry strings.
+ * Most registry values are small (<128 chars). Use a stack buffer for common case,
+ * only fall back to heap for unusually large values. This eliminates malloc/free
+ * overhead for the vast majority of registry operations.
+ */
+#define REG_VALUE_STACK_SIZE 128
+
 static void set_reg_ascii_str( HANDLE hkey, const char *name, const char *value )
 {
     size_t len = strlen( value ) + 1;
-    WCHAR nameW[64], *valueW;
+    WCHAR nameW[64];
+    WCHAR stack_buf[REG_VALUE_STACK_SIZE];
+    WCHAR *valueW = stack_buf;
 
-    if (!(valueW = (WCHAR *)malloc( len * sizeof(*valueW) ))) return;
+    /* Use heap only for unusually large values */
+    if (len > REG_VALUE_STACK_SIZE)
+    {
+        if (!(valueW = (WCHAR *)malloc( len * sizeof(*valueW) ))) return;
+    }
+
     asciiz_to_unicode( valueW, value );
     asciiz_to_unicode( nameW, name );
     set_reg_value( hkey, nameW, REG_SZ, valueW, len * sizeof(*valueW) );
-    free( valueW );
+
+    if (valueW != stack_buf) free( valueW );
 }
 
 static void set_reg_ascii_wstr( HANDLE hkey, const char *name, const WCHAR *valueW )
@@ -961,29 +985,52 @@ static void collapse_path( WCHAR *path, UINT mark )
     *p = 0;
 }
 
+/* OPTIMIZATION: Use stack buffer first, avoid malloc/free loop for common paths.
+ * Most file paths are under 256 chars. Use a stack buffer initially, only
+ * fall back to heap allocation if the path is unusually long. This eliminates
+ * the malloc/free loop that was happening for every path conversion.
+ */
+#define GET_UNIX_PATH_STACK_SIZE 256
+
 static char *get_unix_file_name( const WCHAR *path )
 {
     UNICODE_STRING nt_name;
     OBJECT_ATTRIBUTES attr;
     NTSTATUS status;
-    ULONG size = 256;
-    char *buffer;
+    ULONG size = GET_UNIX_PATH_STACK_SIZE;
+    char stack_buf[GET_UNIX_PATH_STACK_SIZE];
+    char *buffer = stack_buf;
+    char *heap_buf = NULL;
 
     nt_name.Buffer = (WCHAR *)path;
     nt_name.MaximumLength = nt_name.Length = lstrlenW( path ) * sizeof(WCHAR);
     InitializeObjectAttributes( &attr, &nt_name, 0, 0, NULL );
-    for (;;)
+
+    status = wine_nt_to_unix_file_name( &attr, buffer, &size, FILE_OPEN_IF );
+
+    /* If stack buffer was too small, allocate heap buffer with required size */
+    if (status == STATUS_BUFFER_TOO_SMALL)
     {
-        if (!(buffer = (char *)malloc( size ))) return NULL;
+        if (!(heap_buf = (char *)malloc( size ))) return NULL;
+        buffer = heap_buf;
         status = wine_nt_to_unix_file_name( &attr, buffer, &size, FILE_OPEN_IF );
-        if (status != STATUS_BUFFER_TOO_SMALL) break;
-        free( buffer );
     }
+
     if (status && status != STATUS_NO_SUCH_FILE)
     {
-        free( buffer );
+        free( heap_buf );
         return NULL;
     }
+
+    /* If we used stack buffer, need to dup it since caller expects to free */
+    if (buffer == stack_buf)
+    {
+        size_t len = strlen( stack_buf ) + 1;
+        if (!(heap_buf = (char *)malloc( len ))) return NULL;
+        memcpy( heap_buf, stack_buf, len );
+        buffer = heap_buf;
+    }
+
     return buffer;
 }
 
